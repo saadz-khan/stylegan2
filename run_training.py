@@ -51,6 +51,7 @@ def run(dataset, data_dir, result_dir, config_id, num_gpus, total_kimg, gamma, m
         train.resume_kimg = kimg
     except:
         print('Couldn\'t find valid snapshot, starting over')
+        resume_pkl = None
     train.data_dir = data_dir
     train.total_kimg = total_kimg
     train.mirror_augment = mirror_augment
