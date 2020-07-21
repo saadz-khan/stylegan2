@@ -258,7 +258,7 @@ def G_main(
     truncation_psi_val      = None,                     # Value for truncation_psi to use during validation.
     truncation_cutoff_val   = None,                     # Value for truncation_cutoff to use during validation.
     dlatent_avg_beta        = 0.995,                    # Decay for tracking the moving average of W during training. None = disable.
-    style_mixing_prob       = 0.0,                      # Probability of mixing styles during training. None = disable.
+    style_mixing_prob       = 0.9,                      # Probability of mixing styles during training. None = disable.
     is_training             = False,                    # Network is under training? Enables and disables specific features.
     is_validation           = False,                    # Network is under validation? Chooses which value to use for truncation_psi.
     return_dlatents         = False,                    # Return dlatents in addition to the images?
