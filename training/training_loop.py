@@ -6,6 +6,7 @@
 
 """Main training script."""
 
+import pickle
 import numpy as np
 import tensorflow as tf
 import dnnlib
@@ -15,17 +16,21 @@ from dnnlib.tflib.autosummary import autosummary
 from training import dataset
 from training import misc
 from metrics import metric_base
+import os
 
 #----------------------------------------------------------------------------
 # Just-in-time processing of training images before feeding them to the networks.
 
-def process_reals(x, labels, lod, mirror_augment, drange_data, drange_net):
+def process_reals(x, labels, lod, mirror_augment, mirror_augment_v, drange_data, drange_net):
     with tf.name_scope('DynamicRange'):
         x = tf.cast(x, tf.float32)
         x = misc.adjust_dynamic_range(x, drange_data, drange_net)
     if mirror_augment:
         with tf.name_scope('MirrorAugment'):
             x = tf.where(tf.random_uniform([tf.shape(x)[0]]) < 0.5, x, tf.reverse(x, [3]))
+    if mirror_augment_v:
+        with tf.name_scope('MirrorAugment_V'):
+            x = tf.where(tf.random_uniform([tf.shape(x)[0]]) < 0.5, x, tf.reverse(x, [2]))
     with tf.name_scope('FadeLOD'): # Smooth crossfade between consecutive levels-of-detail.
         s = tf.shape(x)
         y = tf.reshape(x, [-1, s[1], s[2]//2, 2, s[3]//2, 2])
@@ -59,8 +64,10 @@ def training_schedule(
     D_lrate_base            = 0.002,    # Learning rate for the discriminator.
     D_lrate_dict            = {},       # Resolution-specific overrides.
     lrate_rampup_kimg       = 0,        # Duration of learning rate ramp-up.
-    tick_kimg_base          = 2,        # Default interval of progress snapshots.
-    tick_kimg_dict          = {8:28, 16:24, 32:20, 64:16, 128:12, 256:8, 512:6, 1024:4}): # Resolution-specific overrides.
+    tick_kimg_base          = 4,        # Default interval of progress snapshots.
+    tick_kimg_dict          = {8:28, 16:24, 32:20, 64:16, 128:12, 256:8, 512:6, 1024:4}, # Resolution-specific overrides.
+    restore_partial_fn      = None      # Filename of to be restored network
+    ):
 
     # Initialize result dict.
     s = dnnlib.EasyDict()
@@ -81,22 +88,26 @@ def training_schedule(
         if lod_transition_kimg > 0:
             s.lod -= max(phase_kimg - lod_training_kimg, 0.0) / lod_transition_kimg
         s.lod = max(s.lod, 0.0)
-    s.resolution = 2 ** (training_set.resolution_log2 - int(np.floor(s.lod)))
+    #s.resolution = 2 ** (training_set.resolution_log2 - int(np.floor(s.lod)))
 
     # Minibatch size.
-    s.minibatch_size = minibatch_size_dict.get(s.resolution, minibatch_size_base)
-    s.minibatch_gpu = minibatch_gpu_dict.get(s.resolution, minibatch_gpu_base)
+    #s.minibatch_size = minibatch_size_dict.get(s.resolution, minibatch_size_base)
+    #s.minibatch_gpu = minibatch_gpu_dict.get(s.resolution, minibatch_gpu_base)
 
+    s.minibatch_size = minibatch_size_base
+    s.minibatch_gpu = minibatch_gpu_base
     # Learning rate.
-    s.G_lrate = G_lrate_dict.get(s.resolution, G_lrate_base)
-    s.D_lrate = D_lrate_dict.get(s.resolution, D_lrate_base)
+    #s.G_lrate = G_lrate_dict.get(s.resolution, G_lrate_base)
+    #s.D_lrate = D_lrate_dict.get(s.resolution, D_lrate_base)
+    s.G_lrate = G_lrate_base
+    s.D_lrate = D_lrate_base
     if lrate_rampup_kimg > 0:
         rampup = min(s.kimg / lrate_rampup_kimg, 1.0)
         s.G_lrate *= rampup
         s.D_lrate *= rampup
 
     # Other parameters.
-    s.tick_kimg = tick_kimg_dict.get(s.resolution, tick_kimg_base)
+    s.tick_kimg = 6 #tick_kimg_dict.get(s.resolution, tick_kimg_base)
     return s
 
 #----------------------------------------------------------------------------
@@ -123,15 +134,19 @@ def training_loop(
     reset_opt_for_new_lod   = True,     # Reset optimizer internal state (e.g. Adam moments) when new layers are introduced?
     total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
     mirror_augment          = False,    # Enable mirror augment?
+    mirror_augment_v        = False,    # Enable mirror augment vertically?
     drange_net              = [-1,1],   # Dynamic range used when feeding image data to the networks.
     image_snapshot_ticks    = 50,       # How often to save image snapshots? None = only save 'reals.png' and 'fakes-init.png'.
     network_snapshot_ticks  = 50,       # How often to save network snapshots? None = only save 'networks-final.pkl'.
     save_tf_graph           = False,    # Include full TensorFlow computation graph in the tfevents file?
     save_weight_histograms  = False,    # Include weight histograms in the tfevents file?
-    # resume_pkl              = './networks/stylegan2-ffhq-config-f.pkl',     # Network pickle to resume training from, None = train from scratch.
-    resume_pkl              = 'latest',
-    resume_kimg             = 10000.0,      # Assumed training progress at the beginning. Affects reporting and training schedule.
+    resume_pkl              = 'latest',     # Network pickle to resume training from, None = train from scratch.
+    #resume_pkl              = 'restore_partial',     # Network pickle to resume training from, None = train from scratch.
+    resume_kimg             = 0.0,      # Assumed training progress at the beginning. Affects reporting and training schedule.
+    #resume_kimg             = 6727.0,      # Assumed training progress at the beginning. Affects reporting and training schedule.
     resume_time             = 0.0,      # Assumed wallclock time at the beginning. Affects reporting.
+    restore_partial_fn      = None,     # Filename of to be restored network
+    #restore_partial_fn      = 'wikiart-mmavg-006727.pkl',     # Filename of to be restored network
     resume_with_new_nets    = False):   # Construct new networks according to G_args and D_args before resuming training?
 
     # Initialize dnnlib and TensorFlow.
@@ -145,18 +160,35 @@ def training_loop(
 
     # Construct or load networks.
     with tf.device('/gpu:0'):
-        if resume_pkl == 'latest':
-           resume_pkl, resume_kimg = misc.locate_latest_pkl(dnnlib.submit_config.run_dir_root)
         if resume_pkl is None or resume_with_new_nets:
             print('Constructing networks...')
             G = tflib.Network('G', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **G_args)
             D = tflib.Network('D', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **D_args)
             Gs = G.clone('Gs')
         if resume_pkl is not None:
-            print('Loading networks from "%s"...' % resume_pkl)
-            rG, rD, rGs = misc.load_pkl(resume_pkl)
-            if resume_with_new_nets: G.copy_vars_from(rG); D.copy_vars_from(rD); Gs.copy_vars_from(rGs)
-            else: G = rG; D = rD; Gs = rGs
+            if resume_pkl == 'restore_partial':
+                print('Restore partially...')
+                # Initialize networks
+                G = tflib.Network('G', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **G_args)
+                D = tflib.Network('D', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **D_args)
+                Gs = G.clone('Gs')
+
+                # Load pre-trained networks
+                assert restore_partial_fn != None
+                G_partial, D_partial, Gs_partial = pickle.load(open(restore_partial_fn, 'rb'))
+
+                # Restore (subset of) pre-trained weights
+                # (only parameters that match both name and shape)
+                G.copy_compatible_trainables_from(G_partial)
+                D.copy_compatible_trainables_from(D_partial)
+                Gs.copy_compatible_trainables_from(Gs_partial)
+            else:
+                if resume_pkl == 'latest':
+                    resume_pkl, resume_kimg = misc.locate_latest_pkl(dnnlib.submit_config.run_dir_root)
+                print('Loading networks from "%s"...' % resume_pkl)
+                rG, rD, rGs = misc.load_pkl(resume_pkl)
+                if resume_with_new_nets: G.copy_vars_from(rG); D.copy_vars_from(rD); Gs.copy_vars_from(rGs)
+                else: G = rG; D = rD; Gs = rGs
 
     # Print layers and generate initial image snapshot.
     G.print_layers(); D.print_layers()
@@ -206,7 +238,7 @@ def training_loop(
                 reals_var = tf.Variable(name='reals', trainable=False, initial_value=tf.zeros([sched.minibatch_gpu] + training_set.shape))
                 labels_var = tf.Variable(name='labels', trainable=False, initial_value=tf.zeros([sched.minibatch_gpu, training_set.label_size]))
                 reals_write, labels_write = training_set.get_minibatch_tf()
-                reals_write, labels_write = process_reals(reals_write, labels_write, lod_in, mirror_augment, training_set.dynamic_range, drange_net)
+                reals_write, labels_write = process_reals(reals_write, labels_write, lod_in, mirror_augment, mirror_augment_v, training_set.dynamic_range, drange_net)
                 reals_write = tf.concat([reals_write, reals_var[minibatch_gpu_in:]], axis=0)
                 labels_write = tf.concat([labels_write, labels_var[minibatch_gpu_in:]], axis=0)
                 data_fetch_ops += [tf.assign(reals_var, reals_write)]
@@ -257,8 +289,10 @@ def training_loop(
     if save_weight_histograms:
         G.setup_weight_histograms(); D.setup_weight_histograms()
     metrics = metric_base.MetricGroup(metric_arg_list)
-
     print('Training for %d kimg...\n' % total_kimg)
+
+
+
     dnnlib.RunContext.get().update('', cur_epoch=resume_kimg, max_epoch=total_kimg)
     maintenance_time = dnnlib.RunContext.get().get_last_update_interval()
     cur_nimg = int(resume_kimg * 1000)
@@ -313,7 +347,6 @@ def training_loop(
 
         # Perform maintenance tasks once per tick.
         done = (cur_nimg >= total_kimg * 1000)
-        # print(cur_nimg, tick_start_nimg + sched.tick_kimg * 1000)
         if cur_tick < 0 or cur_nimg >= tick_start_nimg + sched.tick_kimg * 1000 or done:
             cur_tick += 1
             tick_kimg = (cur_nimg - tick_start_nimg) / 1000.0
@@ -342,8 +375,7 @@ def training_loop(
             if network_snapshot_ticks is not None and (cur_tick % network_snapshot_ticks == 0 or done):
                 pkl = dnnlib.make_run_dir_path('network-snapshot-%06d.pkl' % (cur_nimg // 1000))
                 misc.save_pkl((G, D, Gs), pkl)
-                if network_snapshot_ticks is not None and (cur_tick % (network_snapshot_ticks*4) == 0): 
-                    metrics.run(pkl, run_dir=dnnlib.make_run_dir_path(), data_dir=dnnlib.convert_path(data_dir), num_gpus=num_gpus, tf_config=tf_config)
+                metrics.run(pkl, run_dir=dnnlib.make_run_dir_path(), data_dir=dnnlib.convert_path(data_dir), num_gpus=num_gpus, tf_config=tf_config)
 
             # Update summaries and RunContext.
             metrics.update_autosummaries()
