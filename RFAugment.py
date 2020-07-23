@@ -30,6 +30,7 @@ def augment(batch, policy='', channels_first=True, mode='gpu', probability=None)
     print(batch.shape)
     if mode == 'gpu':
         print('Augmenting reals and fake in gpu mode')
+        print('Augment probability',probability)
         if policy:
             if channels_first:
                 print('Transposing channels')
