@@ -1,5 +1,3 @@
-# This codebase is no longer maintained. Please see the [StyleGAN2-ADA repo](https://github.com/dvschultz/stylegan2-ada) for the latest changes and updates. This repo is only left up for people still using it in their workflow.
-
 ## INSTALL
 ```
 git clone https://github.com/dvschultz/stylegan2
