@@ -529,6 +529,76 @@ def create_from_images(tfrecord_dir, image_dir, shuffle):
             else:
                 img = img.transpose([2, 0, 1]) # HWC => CHW
             tfr.add_image(img)
+            
+
+def create_from_images_unsquared(tfrecord_dir, image_dir, shuffle, res_log2=7, resize=None):
+    print('Loading images from "%s"' % image_dir)
+    image_filenames = _get_all_files(image_dir)
+    print(f"detected {len(image_filenames)} images ...")
+    if len(image_filenames) == 0:
+        error("No input images found")
+    img = np.asarray(PIL.Image.open(image_filenames[0]))
+    #resolution = img.shape[0]
+    channels = img.shape[2] if img.ndim == 3 else 1
+    """
+    if resize is None:
+        if img.shape[1] != resolution:
+            error("Input images must have the same width and height")
+        if resolution != 2 ** int(np.floor(np.log2(resolution))):
+            error("Input image resolution must be a power-of-two")
+    """
+    if channels not in [1, 3]:
+        error("Input images must be stored as RGB or grayscale")
+
+    with TFRecordExporter(tfrecord_dir, len(image_filenames)) as tfr:
+        order = (
+            tfr.choose_shuffled_order() if shuffle else np.arange(len(image_filenames))
+        )
+        print("Adding the images to tfrecords ...")
+        for idx in range(order.size):
+            img = np.asarray(PIL.Image.open(image_filenames[order[idx]]))
+            if resize is not None:
+                size = int(2 ** resize)
+                #img = imresize(img, (size, size))
+                img = np.array(Image.fromarray(img).resize((size, size))) 
+            if channels == 1:
+                img = img[np.newaxis, :, :]  # HW => CHW
+            else:
+                img = img.transpose([2, 0, 1])  # HWC => CHW
+            if img.shape[0] > 3:
+                img = img[:3, ...]
+            tfr.add_image(img)
+            
+
+def create_from_images_raw_unsquared(tfrecord_dir, image_dir, shuffle, res_log2=7, resize=None):
+    print('Loading images from "%s"' % image_dir)
+    image_filenames = _get_all_files(image_dir)
+    print(f"detected {len(image_filenames)} images ...")
+    if len(image_filenames) == 0:
+        error("No input images found")
+    img = np.asarray(PIL.Image.open(image_filenames[0]))
+    #resolution = img.shape[0]
+    channels = img.shape[2] if img.ndim == 3 else 1
+    
+    if channels not in [1, 3]:
+        error("Input images must be stored as RGB or grayscale")
+    if shuffle:
+        print("Shuffle the images...")
+    with TFRecordExporter(tfrecord_dir, len(image_filenames)) as tfr:
+        order = (
+            tfr.choose_shuffled_order() if shuffle else np.arange(len(image_filenames))
+        )
+        tfr.create_tfr_writer(img.shape)
+        print("Adding the images to tfrecords ...")
+        for idx in range(order.size):
+            if idx % 1000 == 0:
+                print ("added images", idx)
+            with tf.gfile.FastGFile(image_filenames[order[idx]], 'rb') as fid:
+                try:
+                    tfr.add_image_raw(fid.read())
+                except:
+                    print ('error when adding', image_filenames[order[idx]])
+                    continue
 
 #----------------------------------------------------------------------------
 
